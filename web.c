@@ -252,6 +252,41 @@ static void texts(const char *s)
 }
 
 /* ---------- URLs ---------- */
+static void dedot(char *u)
+{
+	char *a, *p, *r, *w, *s, *e, *tail;
+	size_t len;
+
+	a = strstr(u, "://");
+	if (!a || !(p = strchr(a + 3, '/')))
+		return;
+	tail = xstrdup(p + strcspn(p, "?#"));
+	p[strcspn(p, "?#")] = 0;
+	r = w = p;
+	while (*r) {
+		s = r + 1;
+		e = s + strcspn(s, "/");
+		len = (size_t)(e - s);
+		if (len == 1 && s[0] == '.') {
+			if (!*e)
+				*w++ = '/';
+		} else if (len == 2 && s[0] == '.' && s[1] == '.') {
+			if (w > p) {
+				w--;
+				while (w > p && *w != '/')
+					w--;
+			}
+			if (!*e)
+				*w++ = '/';
+		} else {
+			memmove(w, r, len + 1);
+			w += len + 1;
+		}
+		r = e;
+	}
+	strcpy(w, tail);
+	free(tail);
+}
 
 static char *resolve(const char *href)
 {
@@ -295,6 +330,7 @@ static char *resolve(const char *href)
 		}
 	}
 	bs(&r, href);
+	dedot(r.s);
 	return r.s;
 }
 
@@ -836,6 +872,8 @@ static void follow(int n)
 	sh_quote(&c, links[n - 1]);
 	bs(&c, " | ");
 	sh_quote(&c, self);
+	bs(&c, " --base ");
+	sh_quote(&c, links[n - 1]);
 	if (system(c.s) == -1)
 		perror("web: system");
 	free(c.s);
@@ -1052,6 +1090,8 @@ int main(int argc, char **argv)
 			do_archive = 1;
 		else if (!strcmp(argv[i], "--dump") || !strcmp(argv[i], "-d"))
 			do_dump = 1;
+		else if (!strcmp(argv[i], "--base") && i + 1 < argc)
+			bs(&base, argv[++i]);
 		else {
 			usage();
 			return 1;
