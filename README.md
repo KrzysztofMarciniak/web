@@ -2,6 +2,9 @@
 
 A small terminal HTML reader in one C89 file. It reads HTML on standard input, turns it into plain text, and shows it in a mailx-style pager. It does no networking: pages are fetched by `wget`/`curl` and piped in.
 
+##### No curl/wget?
+[fetch89](https://github.com/KrzysztofMarciniak/fetch89) - Fetch a URL over HTTP or HTTPS and print the body. One C89 file, no curl, no wget.
+
 ## Build
 
 ```sh
@@ -24,6 +27,9 @@ wget -qO- 'http://example.com' | web          # interactive pager
 curl -fsSL 'http://example.com' | web -d      # plain text to stdout
 curl -fsSL 'http://example.com' | web -d | less
 wget -qO- 'http://example.com' | web --archive
+fetch89 example.org | web
+fetch89 example.org | web -d
+fetch89 example.org | web --archive
 ```
 
 Interactive mode is the default. When stdout is not a terminal (pipe or file), pass `-d`, otherwise the pager will still try to start.
