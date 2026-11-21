@@ -17,14 +17,17 @@
  *   WEB_WIDTH        text width (default: min($COLUMNS, 80))
  *   COLUMNS, LINES   terminal size (default 80x24)
  *
- * Pure ISO C, no POSIX headers. Interactive by default (needs /dev/tty);
+ * Pure ISO C, no POSIX headers. Compile with -DNO_TIME to drop <time.h> too
+ * (archive names lose the timestamp). Interactive by default (needs /dev/tty);
  * use --dump (or -d) for plain text, e.g. when piping into a pager or file.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef NO_TIME
 #include <time.h>
+#endif
 
 typedef struct { char *s; size_t len, cap; } Buf;
 
@@ -974,8 +977,10 @@ static int archive(void)
 {
 	const char *dir = getenv("WEB_ARCHIVE_DIR");
 	char stamp[32], num[16];
+#ifndef NO_TIME
 	time_t t = time(NULL);
 	struct tm *tm;
+#endif
 	Buf sl, p;
 	FILE *f;
 	size_t i;
@@ -983,9 +988,13 @@ static int archive(void)
 
 	if (!dir || !*dir)
 		dir = ".";
+#ifndef NO_TIME
 	tm = localtime(&t);
 	if (!tm || !strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", tm))
 		strcpy(stamp, "archive");
+#else
+	strcpy(stamp, "web");
+#endif
 
 	sl.s = NULL;
 	sl.len = sl.cap = 0;
@@ -1107,7 +1116,11 @@ static void edit(void)
 	if (!td || !*td || strlen(td) > 400)
 		td = "/tmp";
 	for (k = 0;; k++) {
+#ifndef NO_TIME
 		sprintf(num, "%lx-%d", (unsigned long)time(NULL), k);
+#else
+		sprintf(num, "%d", k);
+#endif
 		sprintf(path, "%s/web-%s.txt", td, num);
 		f = fopen(path, "rb");
 		if (!f)

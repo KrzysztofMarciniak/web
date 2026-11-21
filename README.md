@@ -9,6 +9,12 @@ cc -std=c89 -pedantic -Wall -Wextra -O2 -o web web.c
 install -m 755 web /usr/local/bin/web
 ```
 
+Optional: add `-DNO_TIME` to drop `<time.h>` entirely. Archive files are then named `web-title-slug.html` (no timestamp, `-1`, `-2`, ... on collisions) and the `e` temp file uses a counter instead of the clock.
+
+```sh
+cc -std=c89 -pedantic -Wall -Wextra -O2 -DNO_TIME -o web web.c
+```
+
 `web` must be on `$PATH` (or run by full path) for `g N` to work, because it re-runs itself to open links.
 
 ## Usage
@@ -66,7 +72,7 @@ Archive files are named `YYYYMMDD-HHMMSS-title-slug.html`, with `-1`, `-2`, ... 
 ## Requirements
 
 Build:
-- A C89 compiler (`cc`, `gcc`, `clang`). Only ISO C headers are used: `stdio.h`, `stdlib.h`, `string.h`, `time.h`. No POSIX headers.
+- A C89 compiler (`cc`, `gcc`, `clang`). Only ISO C headers are used: `stdio.h`, `stdlib.h`, `string.h`, and `time.h` (not needed with `-DNO_TIME`). No POSIX headers.
 
 Run:
 - A POSIX-style shell for `system()`, used by `g N` and `e`.
