@@ -14,19 +14,17 @@
  *   EDITOR           editor for the 'e' command (falls back to VISUAL, vi)
  *   WEB_ARCHIVE_DIR  where --archive writes (default: current dir)
  *   WEB_FETCH        fetch command used by 'g N'
- *   WEB_WIDTH        text width (default: min(terminal, 80))
+ *   WEB_WIDTH        text width (default: min($COLUMNS, 80))
+ *   COLUMNS, LINES   terminal size (default 80x24)
+ *
+ * Pure ISO C, no POSIX headers. Interactive by default (needs /dev/tty);
+ * use --dump (or -d) for plain text, e.g. when piping into a pager or file.
  */
-
-#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <time.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
 
 typedef struct { char *s; size_t len, cap; } Buf;
 
@@ -41,6 +39,12 @@ static int page = 22, width = 80;
 static const char *self = "web";
 
 /* ---------- small helpers ---------- */
+
+static int is_sp(int c) { return c == ' ' || (c >= 9 && c <= 13); }
+static int is_dg(int c) { return c >= '0' && c <= '9'; }
+static int is_al(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int is_an(int c) { return is_al(c) || is_dg(c); }
+static int lc(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
 static void *xrealloc(void *p, size_t n)
 {
@@ -86,8 +90,8 @@ static int ci_ncmp(const char *a, const char *b, size_t n)
 {
 	int x, y;
 	for (; n; n--, a++, b++) {
-		x = tolower((unsigned char)*a);
-		y = tolower((unsigned char)*b);
+		x = lc((unsigned char)*a);
+		y = lc((unsigned char)*b);
 		if (x != y)
 			return x - y;
 		if (!x)
@@ -129,7 +133,9 @@ static const struct { const char *n; const char *u; } ents[] = {
 	{"mdash", "\xe2\x80\x94"}, {"ndash", "\xe2\x80\x93"},
 	{"hellip", "\xe2\x80\xa6"}, {"middot", "\xc2\xb7"},
 	{"copy", "\xc2\xa9"}, {"laquo", "\xc2\xab"}, {"raquo", "\xc2\xbb"},
-	{"bull", "\xe2\x80\xa2"}, {"deg", "\xc2\xb0"}, {"times", "\xc3\x97"},
+	{"bull", "\xe2\x80\xa2"}, {"reg", "\xc2\xae"}, {"trade", "\xe2\x84\xa2"},
+	{"euro", "\xe2\x82\xac"}, {"pound", "\xc2\xa3"}, {"rarr", "\xe2\x86\x92"},
+	{"larr", "\xe2\x86\x90"}, {"shy", ""}, {"ensp", " "}, {"emsp", " "}, {"thinsp", " "}, {"deg", "\xc2\xb0"}, {"times", "\xc3\x97"},
 	{NULL, NULL}
 };
 
@@ -231,11 +237,14 @@ static void brk(int n)
 static void text(int c)
 {
 	if (in_pre) {
-		if (c != '\r')
-			emit(c);
+		if (c == '\r')
+			return;
+		if (c != '\n' && trail > 0)
+			bc(&out, 1);	/* marks a <pre> line: never deduped */
+		emit(c);
 		return;
 	}
-	if (isspace((unsigned char)c)) {
+	if (is_sp((unsigned char)c)) {
 		pend = 1;
 		return;
 	}
@@ -295,9 +304,9 @@ static char *resolve(const char *href)
 	const char *auth, *ps, *be, *ls, *q;
 	size_t i;
 
-	while (isspace((unsigned char)*href))
+	while (is_sp((unsigned char)*href))
 		href++;
-	for (i = 0; isalnum((unsigned char)href[i]) || href[i] == '+' ||
+	for (i = 0; is_an((unsigned char)href[i]) || href[i] == '+' ||
 	    href[i] == '-' || href[i] == '.'; i++)
 		;
 	if ((i > 0 && href[i] == ':') || !*b)
@@ -334,8 +343,30 @@ static char *resolve(const char *href)
 	return r.s;
 }
 
+static int link_new;
+static Buf alt;		/* alt text of an image inside the current link */
+
+static int has_text(size_t from)
+{
+	for (; from < out.len; from++)
+		if (out.s[from] != '\n' && out.s[from] != ' ')
+			return 1;
+	return 0;
+}
+
+
+/* same URL twice gets the same number */
 static int addlink(char *u)
 {
+	int i;
+
+	for (i = 0; i < nlinks; i++)
+		if (!strcmp(links[i], u)) {
+			free(u);
+			link_new = 0;
+			return i + 1;
+		}
+	link_new = 1;
 	if (nlinks == caplinks) {
 		caplinks = caplinks ? caplinks * 2 : 32;
 		links = xrealloc(links, (size_t)caplinks * sizeof *links);
@@ -352,13 +383,13 @@ static int attr(const char *s, const char *e, const char *want, Buf *v)
 	size_t nl, wl = strlen(want);
 	char q;
 
-	while (s < e && !isspace((unsigned char)*s) && *s != '/')
+	while (s < e && !is_sp((unsigned char)*s) && *s != '/')
 		s++;
 	while (s < e) {
-		while (s < e && (isspace((unsigned char)*s) || *s == '/'))
+		while (s < e && (is_sp((unsigned char)*s) || *s == '/'))
 			s++;
 		n = s;
-		while (s < e && !isspace((unsigned char)*s) && *s != '=' &&
+		while (s < e && !is_sp((unsigned char)*s) && *s != '=' &&
 		    *s != '/')
 			s++;
 		if (s == n) {
@@ -366,12 +397,12 @@ static int attr(const char *s, const char *e, const char *want, Buf *v)
 			continue;
 		}
 		nl = (size_t)(s - n);
-		while (s < e && isspace((unsigned char)*s))
+		while (s < e && is_sp((unsigned char)*s))
 			s++;
 		vs = ve = NULL;
 		if (s < e && *s == '=') {
 			s++;
-			while (s < e && isspace((unsigned char)*s))
+			while (s < e && is_sp((unsigned char)*s))
 				s++;
 			if (s < e && (*s == '"' || *s == '\'')) {
 				q = *s++;
@@ -383,7 +414,7 @@ static int attr(const char *s, const char *e, const char *want, Buf *v)
 					s++;
 			} else {
 				vs = s;
-				while (s < e && !isspace((unsigned char)*s))
+				while (s < e && !is_sp((unsigned char)*s))
 					s++;
 				ve = s;
 			}
@@ -410,6 +441,108 @@ static const char *skip_to(const char *from, const char *nm)
 	return g ? g + 1 : c + strlen(c);
 }
 
+/* from just after an opening <nm ...>: position after its matching </nm>,
+ * or NULL if the element never closes. */
+static const char *skip_balanced(const char *p, const char *nm)
+{
+	size_t n = strlen(nm);
+	int depth = 1;
+	const char *g;
+
+	while ((p = strchr(p, '<')) != NULL) {
+		if (!strncmp(p, "<!--", 4)) {
+			g = strstr(p + 4, "-->");
+			if (!g)
+				return NULL;
+			p = g + 3;
+			continue;
+		}
+		if (p[1] == '/' && !ci_ncmp(p + 2, nm, n) && !is_an((unsigned char)p[2 + n])) {
+			g = strchr(p, '>');
+			if (!g)
+				return NULL;
+			if (--depth == 0)
+				return g + 1;
+			p = g + 1;
+			continue;
+		}
+		if (!ci_ncmp(p + 1, nm, n) && !is_an((unsigned char)p[1 + n]))
+			depth++;
+		p++;
+	}
+	return NULL;
+}
+
+static int style_hides(const char *s)
+{
+	const char *p;
+
+	for (; *s; s++) {
+		if (!ci_ncmp(s, "display", 7))
+			p = s + 7;
+		else if (!ci_ncmp(s, "visibility", 10))
+			p = s + 10;
+		else
+			continue;
+		while (is_sp((unsigned char)*p))
+			p++;
+		if (*p++ != ':')
+			continue;
+		while (is_sp((unsigned char)*p))
+			p++;
+		if (!ci_ncmp(p, "none", 4) || !ci_ncmp(p, "hidden", 6))
+			return 1;
+	}
+	return 0;
+}
+
+/* Bootstrap-style: d-none (without a d-lg-inline etc.) or d-lg-none */
+static int class_hides(const char *c)
+{
+	int none = 0, show = 0;
+	const char *t;
+	size_t n;
+
+	while (*c) {
+		while (is_sp((unsigned char)*c))
+			c++;
+		t = c;
+		while (*c && !is_sp((unsigned char)*c))
+			c++;
+		n = (size_t)(c - t);
+		if (n == 6 && !strncmp(t, "d-none", 6))
+			none = 1;
+		else if (n > 5 && !strncmp(t, "d-", 2) && t[2] == 'l' && t[3] == 'g' && t[4] == '-') {
+			if (n == 9 && !strncmp(t + 5, "none", 4))
+				return 1;
+			show = 1;
+		} else if (n > 5 && !strncmp(t, "d-", 2) && (t[2] == 'x' || t[2] == 'm' || t[2] == 's'))
+			show = 1;
+	}
+	return none && !show;
+}
+
+static int hidden(const char *s, const char *e)
+{
+	Buf v;
+	int h = 0;
+
+	v.s = NULL;
+	v.len = v.cap = 0;
+	if (attr(s, e, "hidden", &v))
+		h = 1;
+	if (!h && attr(s, e, "aria-hidden", &v) && v.s && !ci_ncmp(v.s, "true", 4))
+		h = 1;
+	v.len = 0;
+	if (!h && attr(s, e, "style", &v) && v.s && style_hides(v.s))
+		h = 1;
+	v.len = 0;
+	if (!h && attr(s, e, "class", &v) && v.s && class_hides(v.s))
+		h = 1;
+	free(v.s);
+	return h;
+}
+
 static int one_of(const char *nm, const char *list)
 {
 	char t[24];
@@ -429,7 +562,7 @@ static void set_title(const char *s, const char *e)
 	decode_range(&tmp, s, e);
 	title.len = 0;
 	for (i = 0; i < tmp.len; i++) {
-		if (isspace((unsigned char)tmp.s[i])) {
+		if (is_sp((unsigned char)tmp.s[i])) {
 			sp = 1;
 			continue;
 		}
@@ -453,8 +586,8 @@ static const char *tag(const char *p)
 		closing = 1;
 		q++;
 	}
-	while (isalnum((unsigned char)*q) && n < 15)
-		nm[n++] = (char)tolower((unsigned char)*q++);
+	while (is_an((unsigned char)*q) && n < 15)
+		nm[n++] = (char)lc((unsigned char)*q++);
 	nm[n] = 0;
 	for (e = p + 1; *e; e++) {
 		if (qt) {
@@ -468,10 +601,16 @@ static const char *tag(const char *p)
 	}
 	after = *e ? e + 1 : e;
 
-	if (one_of(nm, " script style noscript svg template ")) {
+	if (one_of(nm, " script style noscript svg template button select textarea iframe canvas object ")) {
 		if (closing)
 			return after;
 		return skip_to(after, nm);
+	}
+	if (!closing && !one_of(nm, " br hr img input meta link base source wbr area col embed param track ") &&
+	    nm[0] && hidden(p + 1, e)) {
+		c = skip_balanced(after, nm);
+		if (c)
+			return c;
 	}
 	if (!strcmp(nm, "title")) {
 		if (closing)
@@ -504,6 +643,10 @@ static const char *tag(const char *p)
 		return after;
 	}
 	if (!strcmp(nm, "td") || !strcmp(nm, "th")) {
+		if (!closing && trail == 0) {
+			emit(' ');
+			emit('|');
+		}
 		pend = 1;
 		return after;
 	}
@@ -540,6 +683,12 @@ static const char *tag(const char *p)
 	if (!strcmp(nm, "a")) {
 		if (closing) {
 			if (cur_link) {
+				if (!has_text(link_mark) && alt.len) {
+					texts("[img: ");
+					texts(alt.s);
+					texts("]");
+				}
+				alt.len = 0;
 				if (out.len > link_mark) {
 					lv = 0;
 					while (out.len && out.s[out.len - 1] == '\n') {
@@ -548,11 +697,13 @@ static const char *tag(const char *p)
 					}
 					trail = 0;
 					sprintf(t, "[%d]", cur_link);
-					for (q = t; *q; q++)
-						emit(*q);
+					n = (int)strlen(t);
+					if (out.len < (size_t)n || memcmp(out.s + out.len - n, t, (size_t)n))
+						for (q = t; *q; q++)
+							emit(*q);
 					if (lv)
 						brk(lv);
-				} else {
+				} else if (link_new) {
 					free(links[--nlinks]);
 				}
 				cur_link = 0;
@@ -562,6 +713,9 @@ static const char *tag(const char *p)
 		v.s = NULL;
 		v.len = v.cap = 0;
 		cur_link = 0;
+		alt.len = 0;
+		if (trail == 0 && out.len && out.s[out.len - 1] == ']')
+			pend = 1;	/* keep adjacent links apart */
 		if (attr(p + 1, e, "href", &v) && v.len && v.s[0] != '#' &&
 		    ci_ncmp(v.s, "javascript:", 11) != 0) {
 			cur_link = addlink(resolve(v.s));
@@ -574,9 +728,14 @@ static const char *tag(const char *p)
 		v.s = NULL;
 		v.len = v.cap = 0;
 		if (attr(p + 1, e, "alt", &v) && v.len && !strchr(v.s, '/')) {
-			texts("[img: ");
-			texts(v.s);
-			texts("]");
+			if (cur_link) {
+				alt.len = 0;
+				bs(&alt, v.s);	/* only shown if the link has no text */
+			} else {
+				texts("[img: ");
+				texts(v.s);
+				texts("]");
+			}
 		}
 		free(v.s);
 		return after;
@@ -617,7 +776,7 @@ static void parse(const char *h)
 				p = e ? e + 3 : p + strlen(p);
 				continue;
 			}
-			if (isalpha((unsigned char)p[1]) || p[1] == '/') {
+			if (is_al((unsigned char)p[1]) || p[1] == '/') {
 				p = tag(p);
 				continue;
 			}
@@ -638,11 +797,78 @@ static void parse(const char *h)
 	}
 }
 
+/* "[img: X][3]" compares equal to "X[3]" (alt text repeating a caption) */
+static void norm(Buf *d, const char *s, const char *e)
+{
+	const char *q;
+
+	d->len = 0;
+	bs(d, "");
+	while (e > s && (e[-1] == ' ' || e[-1] == '\t'))
+		e--;
+	if (e - s > 6 && !strncmp(s, "[img: ", 6) &&
+	    (q = memchr(s + 6, ']', (size_t)(e - s - 6))) != NULL) {
+		bmem(d, s + 6, (size_t)(q - (s + 6)));
+		s = q + 1;
+	}
+	bmem(d, s, (size_t)(e - s));
+}
+
+/* drop a line identical to the previous non-blank one; strip <pre> marks */
+static void dedupe(void)
+{
+	Buf w, cn, pn;
+	const char *s = out.s, *e;
+	int pre;
+
+	w.s = cn.s = pn.s = NULL;
+	w.len = w.cap = cn.len = cn.cap = pn.len = pn.cap = 0;
+	bs(&w, "");
+	bs(&pn, "");
+	while (*s) {
+		e = strchr(s, '\n');
+		if (!e)
+			e = s + strlen(s);
+		pre = (*s == 1);
+		if (pre)
+			s++;
+		norm(&cn, s, e);
+		if (!pre && cn.len == 1 && cn.s[0] == '*') {
+			if (*e)
+				e++;	/* empty list item */
+			s = e;
+			continue;
+		}
+		if (pre || !cn.len) {
+			bmem(&w, s, (size_t)(e - s));
+		} else if (cn.len == pn.len && !memcmp(cn.s, pn.s, cn.len)) {
+			if (*e)
+				e++;
+			s = e;
+			continue;
+		} else {
+			bmem(&w, s, (size_t)(e - s));
+			pn.len = 0;
+			bmem(&pn, cn.s, cn.len);
+		}
+		if (*e) {
+			bc(&w, '\n');
+			e++;
+		}
+		s = e;
+	}
+	free(out.s);
+	out = w;
+	free(cn.s);
+	free(pn.s);
+}
+
 static void render(const char *html)
 {
 	bs(&out, "");
 	trail = 2;
 	parse(html);
+	dedupe();
 	while (out.len && (out.s[out.len - 1] == '\n' ||
 	    out.s[out.len - 1] == ' '))
 		out.s[--out.len] = 0;
@@ -757,8 +983,6 @@ static int archive(void)
 
 	if (!dir || !*dir)
 		dir = ".";
-	else
-		mkdir(dir, 0777);
 	tm = localtime(&t);
 	if (!tm || !strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", tm))
 		strcpy(stamp, "archive");
@@ -768,8 +992,8 @@ static int archive(void)
 	bs(&sl, "");
 	for (i = 0; i < title.len && sl.len < 48; i++) {
 		unsigned char c = (unsigned char)title.s[i];
-		if (c < 128 && isalnum(c))
-			bc(&sl, tolower(c));
+		if (c < 128 && is_an(c))
+			bc(&sl, lc(c));
 		else if (sl.len && sl.s[sl.len - 1] != '-')
 			bc(&sl, '-');
 	}
@@ -813,17 +1037,10 @@ static int archive(void)
 
 static void termsize(int *cols, int *rows)
 {
-	struct winsize ws;
 	const char *e;
 
 	*cols = 80;
 	*rows = 24;
-	if (ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
-		*cols = ws.ws_col;
-		if (ws.ws_row > 0)
-			*rows = ws.ws_row;
-		return;
-	}
 	e = getenv("COLUMNS");
 	if (e && atoi(e) > 0)
 		*cols = atoi(e);
@@ -881,24 +1098,25 @@ static void follow(int n)
 
 static void edit(void)
 {
-	char path[512];
+	char path[512], num[32];
 	const char *td = getenv("TMPDIR"), *ed;
 	FILE *f;
 	Buf c;
-	int fd;
+	int k;
 
 	if (!td || !*td || strlen(td) > 400)
 		td = "/tmp";
-	sprintf(path, "%s/web.XXXXXX", td);
-	fd = mkstemp(path);
-	if (fd < 0) {
-		perror("web: mkstemp");
-		return;
+	for (k = 0;; k++) {
+		sprintf(num, "%lx-%d", (unsigned long)time(NULL), k);
+		sprintf(path, "%s/web-%s.txt", td, num);
+		f = fopen(path, "rb");
+		if (!f)
+			break;
+		fclose(f);
 	}
-	f = fdopen(fd, "w");
+	f = fopen(path, "w");
 	if (!f) {
-		close(fd);
-		unlink(path);
+		perror(path);
 		return;
 	}
 	write_text(f);
@@ -917,7 +1135,7 @@ static void edit(void)
 	if (system(c.s) == -1)
 		perror("web: system");
 	free(c.s);
-	unlink(path);
+	remove(path);
 }
 
 static void help(void)
@@ -965,7 +1183,7 @@ static void interactive(void)
 			a++;
 		a[strcspn(a, "\r\n")] = 0;
 
-		if (isdigit((unsigned char)*a)) {
+		if (is_dg((unsigned char)*a)) {
 			n = atoi(a);
 			if (n >= 1 && n <= nlinks)
 				printf("[%d] %s\n", n, links[n - 1]);
@@ -1097,10 +1315,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (isatty(0)) {
-		usage();
-		return 1;
-	}
 	while ((n = fread(tmp, 1, sizeof tmp, stdin)) > 0)
 		bmem(&rawbuf, tmp, n);
 	if (!rawbuf.len) {
@@ -1124,7 +1338,7 @@ int main(int argc, char **argv)
 		page = 5;
 	wrap();
 
-	if (do_dump || !isatty(1))
+	if (do_dump)
 		write_text(stdout);
 	else
 		interactive();
