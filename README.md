@@ -3,7 +3,7 @@
 A small terminal HTML reader in one C89 file. It reads HTML on standard input, turns it into plain text, and shows it in a mailx-style pager. It does no networking: pages are fetched by `wget`/`curl` and piped in.
 
 ##### No curl/wget?
-[fetch89](https://github.com/KrzysztofMarciniak/fetch89) - Fetch a URL over HTTP or HTTPS and print the body. One C89 file, no curl, no wget.
+[fetch89](https://github.com/KrzysztofMarciniak/fetch89) - Fetch a URL over HTTP or HTTPS and print the body. One C89 file.
 
 ## Build
 
