@@ -1,25 +1,25 @@
 /*
- * web - read HTML on stdin, show it as plain text. mailx-style pager.
+ * web_plain - read HTML on stdin, write wrapped plain text on stdout,
+ * followed by a "References:" list of numbered link URLs.
  *
- *   cc -std=c89 -pedantic -Wall -O2 -o web web.c
+ *   cc -std=c89 -pedantic -Wall -O2 -o web_plain web_plain.c
  *
- *   wget -qO- 'http://example.com' | web
- *   wget -qO- 'http://example.com' | web --archive
- *   curl -fsSL 'https://example.com' | web
+ *   wget -qO- 'http://example.com' | web_plain
+ *   wget -qO- 'http://example.com' | web_plain --archive
+ *   curl -fsSL 'https://example.com' | web_plain | web_pager
  *
- * No networking in here. Links are followed by piping through $WEB_FETCH
- * (default: "wget -qO-") into another web.
+ * Options:
+ *   -a, --archive    save the raw HTML to a file, print its path
+ *   --base URL       base URL for resolving relative links
+ *   -v, --version    print version
  *
  * Env:
- *   EDITOR           editor for the 'e' command (falls back to VISUAL, vi)
  *   WEB_ARCHIVE_DIR  where --archive writes (default: current dir)
- *   WEB_FETCH        fetch command used by 'g N'
  *   WEB_WIDTH        text width (default: min($COLUMNS, 80))
- *   COLUMNS, LINES   terminal size (default 80x24)
+ *   COLUMNS          terminal width (default 80)
  *
- * Pure ISO C, no POSIX headers. Compile with -DNO_TIME to drop <time.h> too
- * (archive names lose the timestamp). Interactive by default (needs /dev/tty);
- * use --dump (or -d) for plain text, e.g. when piping into a pager or file.
+ * Pure ISO C, no POSIX headers. Compile with -DNO_TIME to drop <time.h>
+ * (archive names lose the timestamp). No networking.
  */
 
 #include <stdio.h>
@@ -29,6 +29,8 @@
 #include <time.h>
 #endif
 
+#define VERSION "2.0"
+
 typedef struct { char *s; size_t len, cap; } Buf;
 
 static Buf out, title, base, rawbuf;
@@ -37,9 +39,8 @@ static int nlinks, caplinks;
 static int trail = 2, pend, in_pre, cur_link;
 static size_t link_mark;
 static char **lines;
-static long nlin, cur;
-static int page = 22, width = 80;
-static const char *self = "web";
+static long nlin;
+static int width = 80;
 
 /* ---------- small helpers ---------- */
 
@@ -53,7 +54,7 @@ static void *xrealloc(void *p, size_t n)
 {
 	p = realloc(p, n);
 	if (!p) {
-		fputs("web: out of memory\n", stderr);
+		fputs("web_plain: out of memory\n", stderr);
 		exit(1);
 	}
 	return p;
@@ -112,18 +113,6 @@ static const char *find_ci(const char *h, const char *nd)
 		if (ci_ncmp(h, nd, n) == 0)
 			return h;
 	return NULL;
-}
-
-static void sh_quote(Buf *b, const char *s)
-{
-	bc(b, '\'');
-	for (; *s; s++) {
-		if (*s == '\'')
-			bs(b, "'\\''");
-		else
-			bc(b, *s);
-	}
-	bc(b, '\'');
 }
 
 /* ---------- entities ---------- */
@@ -1044,286 +1033,31 @@ static int archive(void)
 	return 0;
 }
 
-static void termsize(int *cols, int *rows)
-{
-	const char *e;
-
-	*cols = 80;
-	*rows = 24;
-	e = getenv("COLUMNS");
-	if (e && atoi(e) > 0)
-		*cols = atoi(e);
-	e = getenv("LINES");
-	if (e && atoi(e) > 0)
-		*rows = atoi(e);
-}
-
-/* ---------- interactive ---------- */
-
-static void show(long start)
-{
-	long i, end;
-
-	if (nlin == 0) {
-		puts("(empty)");
-		return;
-	}
-	if (start < 0)
-		start = 0;
-	end = start + page;
-	if (end > nlin)
-		end = nlin;
-	for (i = start; i < end; i++)
-		puts(lines[i]);
-	cur = start;
-	printf("-- %ld-%ld of %ld --\n", start + 1, end, nlin);
-}
-
-static void follow(int n)
-{
-	const char *f;
-	Buf c;
-
-	if (n < 1 || n > nlinks) {
-		puts("No such link.");
-		return;
-	}
-	f = getenv("WEB_FETCH");
-	if (!f || !*f)
-		f = "wget -qO-";
-	c.s = NULL;
-	c.len = c.cap = 0;
-	bs(&c, f);
-	bc(&c, ' ');
-	sh_quote(&c, links[n - 1]);
-	bs(&c, " | ");
-	sh_quote(&c, self);
-	bs(&c, " --base ");
-	sh_quote(&c, links[n - 1]);
-	if (system(c.s) == -1)
-		perror("web: system");
-	free(c.s);
-}
-
-static void edit(void)
-{
-	char path[512], num[32];
-	const char *td = getenv("TMPDIR"), *ed;
-	FILE *f;
-	Buf c;
-	int k;
-
-	if (!td || !*td || strlen(td) > 400)
-		td = "/tmp";
-	for (k = 0;; k++) {
-#ifndef NO_TIME
-		sprintf(num, "%lx-%d", (unsigned long)time(NULL), k);
-#else
-		sprintf(num, "%d", k);
-#endif
-		sprintf(path, "%s/web-%s.txt", td, num);
-		f = fopen(path, "rb");
-		if (!f)
-			break;
-		fclose(f);
-	}
-	f = fopen(path, "w");
-	if (!f) {
-		perror(path);
-		return;
-	}
-	write_text(f);
-	fclose(f);
-	ed = getenv("EDITOR");
-	if (!ed || !*ed)
-		ed = getenv("VISUAL");
-	if (!ed || !*ed)
-		ed = "vi";
-	c.s = NULL;
-	c.len = c.cap = 0;
-	bs(&c, ed);
-	bc(&c, ' ');
-	sh_quote(&c, path);
-	bs(&c, " </dev/tty");
-	if (system(c.s) == -1)
-		perror("web: system");
-	free(c.s);
-	remove(path);
-}
-
-static void help(void)
-{
-	puts("  <enter> n   next page          p   previous page");
-	puts("  t           top                a   print everything");
-	puts("  /text       search             l   list links");
-	puts("  N           show URL of link N g N follow link N ($WEB_FETCH)");
-	puts("  e           open text in $EDITOR");
-	puts("  w file      write text to file");
-	puts("  s           archive raw HTML ($WEB_ARCHIVE_DIR or .)");
-	puts("  q           quit");
-}
-
-static char *arg(char *a)
-{
-	a++;
-	while (*a == ' ' || *a == '\t')
-		a++;
-	return a;
-}
-
-static void interactive(void)
-{
-	FILE *tty = fopen("/dev/tty", "r"), *f;
-	char buf[512], *a;
-	static char pat[256];
-	long i, j, found, start;
-	int n;
-
-	if (!tty) {
-		write_text(stdout);
-		return;
-	}
-	printf("web: %s (%ld lines, %d links) - h for help\n",
-	    title.len ? title.s : "(untitled)", nlin, nlinks);
-	show(0);
-	for (;;) {
-		fputs("& ", stdout);
-		fflush(stdout);
-		if (!fgets(buf, sizeof buf, tty))
-			break;
-		a = buf;
-		while (*a == ' ' || *a == '\t')
-			a++;
-		a[strcspn(a, "\r\n")] = 0;
-
-		if (is_dg((unsigned char)*a)) {
-			n = atoi(a);
-			if (n >= 1 && n <= nlinks)
-				printf("[%d] %s\n", n, links[n - 1]);
-			else
-				puts("No such link.");
-			continue;
-		}
-		switch (*a) {
-		case 0:
-		case 'n':
-		case '+':
-			if (cur + page >= nlin)
-				puts("End. (p previous, q quit)");
-			else
-				show(cur + page);
-			break;
-		case 'p':
-		case '-':
-			if (cur <= 0)
-				puts("Top.");
-			else
-				show(cur - page);
-			break;
-		case 't':
-			show(0);
-			break;
-		case 'a':
-			for (i = 0; i < nlin; i++)
-				puts(lines[i]);
-			cur = nlin;
-			break;
-		case '/':
-			a = arg(a);
-			if (*a) {
-				strncpy(pat, a, sizeof pat - 1);
-				pat[sizeof pat - 1] = 0;
-			}
-			if (!*pat) {
-				puts("No pattern.");
-				break;
-			}
-			if (nlin == 0)
-				break;
-			start = cur + page;
-			found = -1;
-			for (i = 0; i < nlin; i++) {
-				j = (start + i) % nlin;
-				if (find_ci(lines[j], pat)) {
-					found = j;
-					break;
-				}
-			}
-			if (found < 0)
-				puts("Not found.");
-			else
-				show(found);
-			break;
-		case 'l':
-			if (!nlinks)
-				puts("No links.");
-			for (n = 0; n < nlinks; n++)
-				printf("%3d. %s\n", n + 1, links[n]);
-			break;
-		case 'g':
-			follow(atoi(arg(a)));
-			break;
-		case 'e':
-		case 'v':
-			edit();
-			break;
-		case 'w':
-			a = arg(a);
-			if (!*a) {
-				puts("usage: w file");
-				break;
-			}
-			f = fopen(a, "w");
-			if (!f) {
-				perror(a);
-				break;
-			}
-			write_text(f);
-			fclose(f);
-			printf("wrote %s\n", a);
-			break;
-		case 's':
-			archive();
-			break;
-		case 'h':
-		case '?':
-			help();
-			break;
-		case 'q':
-		case 'x':
-			fclose(tty);
-			return;
-		default:
-			puts("? (h for help)");
-		}
-	}
-	fclose(tty);
-}
-
 /* ---------- main ---------- */
 
 static void usage(void)
 {
-		fputs("usage: wget -qO- URL | web [--archive] [--dump]\n"
-      		"       curl -fsSL URL | web [--archive] [--dump]\n", stderr);
+	fputs("usage: wget -qO- URL | web_plain [--archive] [--base URL]\n"
+	    "       curl -fsSL URL | web_plain [--archive] [--base URL]\n",
+	    stderr);
 }
 
 int main(int argc, char **argv)
 {
-	int i, do_archive = 0, do_dump = 0, cols, rows;
+	int i, do_archive = 0, cols = 80;
 	char tmp[4096];
 	const char *e;
 	size_t n;
 
-	self = argv[0];
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--archive") || !strcmp(argv[i], "-a"))
 			do_archive = 1;
-		else if (!strcmp(argv[i], "--dump") || !strcmp(argv[i], "-d"))
-			do_dump = 1;
 		else if (!strcmp(argv[i], "--base") && i + 1 < argc)
 			bs(&base, argv[++i]);
-		else {
+		else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
+			puts("web_plain " VERSION);
+			return 0;
+		} else {
 			usage();
 			return 1;
 		}
@@ -1331,7 +1065,7 @@ int main(int argc, char **argv)
 	while ((n = fread(tmp, 1, sizeof tmp, stdin)) > 0)
 		bmem(&rawbuf, tmp, n);
 	if (!rawbuf.len) {
-		fputs("web: no input\n", stderr);
+		fputs("web_plain: no input\n", stderr);
 		return 1;
 	}
 
@@ -1339,21 +1073,16 @@ int main(int argc, char **argv)
 	if (do_archive)
 		return archive();
 
-	termsize(&cols, &rows);
+	e = getenv("COLUMNS");
+	if (e && atoi(e) > 0)
+		cols = atoi(e);
 	width = cols > 80 ? 80 : cols;
 	e = getenv("WEB_WIDTH");
 	if (e && atoi(e) > 10)
 		width = atoi(e);
 	if (width < 20)
 		width = 20;
-	page = rows - 2;
-	if (page < 5)
-		page = 5;
 	wrap();
-
-	if (do_dump)
-		write_text(stdout);
-	else
-		interactive();
+	write_text(stdout);
 	return 0;
 }
